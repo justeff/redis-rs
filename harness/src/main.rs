@@ -223,7 +223,7 @@ async fn run(a: Args) {
     let c0 = cpu_time();
     let t0 = Instant::now();
     #[cfg(feature = "dhat-heap")]
-    let profiler = dhat::Profiler::builder().file_name(format!("/work/prof/dhat-{}-{}.json", a.label, a.workload)).build();
+    let profiler = dhat::Profiler::builder().file_name(format!("prof/dhat-{}-{}.json", a.label, a.workload)).build();
     let checksum = drive(&con, &a, &mkeys, a.ops).await;
     #[cfg(feature = "dhat-heap")]
     drop(profiler);
