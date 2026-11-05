@@ -44,6 +44,7 @@ futures-util = { version = "0.3.31", default-features = false, features = [
 ], optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 tokio-util = { version = "0.7.5", optional = true }
+memchr = { version = "2", optional = true }
 async-lock = { version = "3", optional = true }
 tokio = { version = "1", features = [
   "sync",
@@ -173,6 +174,7 @@ entra-id = [
 # Instead of specifying "aio", use either "tokio-comp" or "smol-comp".
 aio = [
   "bytes",
+  "dep:memchr",
   "dep:pin-project-lite",
   "dep:futures-util",
   "dep:tokio",

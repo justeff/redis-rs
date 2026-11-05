@@ -236,6 +236,8 @@ where
 mod connection;
 pub(crate) use connection::connect_simple;
 pub use connection::transaction_async;
+#[cfg(feature = "aio")]
+mod frame_codec;
 mod multiplexed_connection;
 pub use multiplexed_connection::*;
 #[cfg(feature = "connection-manager")]

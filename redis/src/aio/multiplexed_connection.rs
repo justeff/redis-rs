@@ -1,3 +1,4 @@
+use super::frame_codec::{FrameCodec, Reply};
 use super::{
     AsyncPushSender, ConnectionLike, Runtime, SharedHandleContainer, SubscribeLikeCommand,
     TaskHandle, send_push, send_subscribe_like_command,
@@ -41,7 +42,7 @@ use std::time::Duration;
 use tokio_util::codec::Decoder;
 
 // Senders which the result of a single request are sent through
-type PipelineOutput = oneshot::Sender<RedisResult<Value>>;
+type PipelineOutput = oneshot::Sender<RedisResult<Reply>>;
 
 enum ErrorOrErrors {
     Errors(Vec<(usize, ServerError)>),
@@ -52,7 +53,7 @@ enum ErrorOrErrors {
 enum ResponseAggregate {
     SingleCommand,
     Pipeline {
-        buffer: Vec<Value>,
+        buffer: Vec<Reply>,
         error_or_errors: ErrorOrErrors,
         expectation: PipelineResponseExpectation,
     },
@@ -206,7 +207,7 @@ fn send_disconnect(push_sender: &mut Option<Arc<dyn AsyncPushSender>>) {
 
 impl<T> PipelineSink<T>
 where
-    T: Stream<Item = RedisResult<Value>> + 'static,
+    T: Stream<Item = RedisResult<Reply>> + 'static,
 {
     fn new(
         sink_stream: T,
@@ -215,7 +216,7 @@ where
         #[cfg(feature = "cache-aio")] cache_manager: Option<CacheManager>,
     ) -> Self
     where
-        T: Sink<Vec<u8>, Error = RedisError> + Stream<Item = RedisResult<Value>> + 'static,
+        T: Sink<Vec<u8>, Error = RedisError> + Stream<Item = RedisResult<Reply>> + 'static,
     {
         Self {
             sink_stream,
@@ -248,11 +249,11 @@ where
         }
     }
 
-    fn send_result(self: Pin<&mut Self>, result: RedisResult<Value>) {
+    fn send_result(self: Pin<&mut Self>, result: RedisResult<Reply>) {
         let self_ = self.project();
         let result = match result {
             // If this push message isn't a reply, we'll pass it as-is to the push manager and stop iterating
-            Ok(Value::Push { kind, data }) if !kind.has_reply() => {
+            Ok(Reply::Value(Value::Push { kind, data })) if !kind.has_reply() => {
                 #[cfg(feature = "cache-aio")]
                 if let Some(cache_manager) = &self_.cache_manager {
                     cache_manager.handle_push_value(&kind, &data);
@@ -262,7 +263,7 @@ where
                 return;
             }
             // If this push message is a reply to a query, we'll clone it to the push manager and continue with sending the reply
-            Ok(Value::Push { kind, data }) if kind.has_reply() => {
+            Ok(Reply::Value(Value::Push { kind, data })) if kind.has_reply() => {
                 send_push_if_present(
                     self_.push_sender,
                     PushInfo {
@@ -270,7 +271,7 @@ where
                         data: data.clone(),
                     },
                 );
-                Ok(Value::Push { kind, data })
+                Ok(Reply::Value(Value::Push { kind, data }))
             }
             _ => result,
         };
@@ -280,7 +281,7 @@ where
         // Only push values are considered, since a regular command's response may be an array
         // that happens to look like a confirmation.
         let change = match &result {
-            Ok(value @ Value::Push { .. }) => subscription_change(value),
+            Ok(Reply::Value(value @ Value::Push { .. })) => subscription_change(value),
             _ => None,
         };
         if let Some(change) = change {
@@ -352,7 +353,7 @@ where
                         && let ErrorOrErrors::Errors(errs) = error_or_errors
                     {
                         match result {
-                            Ok(Value::ServerError(err)) => {
+                            Ok(Reply::Value(Value::ServerError(err))) => {
                                 errs.push((expectation.seen_responses - 2, err)); // - 1 to offset the early increment, and -1 to offset the added MULTI call.
                             }
                             Err(err) => *error_or_errors = ErrorOrErrors::FirstError(err),
@@ -366,7 +367,7 @@ where
                 }
 
                 if matches!(expectation.kind, RequestKind::SubscribeLike)
-                    && matches!(result, Err(_) | Ok(Value::ServerError(_)))
+                    && matches!(result, Err(_) | Ok(Reply::Value(Value::ServerError(_))))
                 {
                     // The server rejected the subscription command with a single error instead
                     // of with its confirmations, so there's nothing more to wait for.
@@ -406,7 +407,7 @@ where
                     match std::mem::replace(error_or_errors, ErrorOrErrors::Errors(Vec::new())) {
                         ErrorOrErrors::Errors(errors) => {
                             if errors.is_empty() {
-                                Ok(Value::Array(std::mem::take(buffer)))
+                                Ok(Reply::Many(std::mem::take(buffer)))
                             } else {
                                 Err(RedisError::make_aborted_transaction(errors))
                             }
@@ -434,7 +435,7 @@ where
 
 impl<T> Sink<PipelineMessage> for PipelineSink<T>
 where
-    T: Sink<Vec<u8>, Error = RedisError> + Stream<Item = RedisResult<Value>> + 'static,
+    T: Sink<Vec<u8>, Error = RedisError> + Stream<Item = RedisResult<Reply>> + 'static,
 {
     type Error = ();
 
@@ -561,7 +562,7 @@ impl Pipeline {
     ) -> (Self, impl Future<Output = ()>)
     where
         T: Sink<Vec<u8>, Error = RedisError>,
-        T: Stream<Item = RedisResult<Value>>,
+        T: Stream<Item = RedisResult<Reply>>,
         T: Unpin + Send + 'static,
     {
         let (sender, receiver) = mpsc::channel(buffer_size);
@@ -625,6 +626,8 @@ impl Pipeline {
                 // failed for one reason or another
                 .map_err(|_| None)
                 .and_then(|res| res.map_err(Some))
+                // Aggregates arrive undecoded and are decoded on the caller's task.
+                .and_then(|reply| reply.into_value().map_err(Some))
         };
 
         match timeout {
@@ -822,6 +825,8 @@ impl MultiplexedConnection {
         }
 
         let subscriptions = config.subscription_tracker.clone().unwrap_or_default();
+        // The handshake is done; from here on the driver only frames aggregate replies.
+        let codec = codec.map_codec(|_| FrameCodec::default());
         let (pipeline, driver) = Pipeline::new(
             codec,
             config.push_sender,
