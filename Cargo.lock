@@ -2206,6 +2206,7 @@ dependencies = [
  "itoa",
  "log",
  "lru",
+ "memchr",
  "native-tls",
  "num-bigint 0.5.1",
  "partial-io",
