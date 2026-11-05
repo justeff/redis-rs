@@ -1,0 +1,15 @@
+[package]
+name = "micro"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+redis = { path = "../wt/combined/redis", features = ["tokio-comp"] }
+itoa = "1"
+
+[profile.release]
+opt-level = 3
+debug = 1
+
+[workspace]
